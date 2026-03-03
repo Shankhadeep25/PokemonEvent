@@ -15,54 +15,43 @@ const generateToken = (user) => {
 };
 
 /**
- * @route   POST /api/auth/register
- * @desc    Register a participant (or admin if secret provided)
+ * @route   POST /api/auth/signup
+ * @desc    Sign up a participant with teamId + name
  * @access  Public
  */
-const register = async (req, res, next) => {
+const signup = async (req, res, next) => {
     try {
-        const { name, password, teamId, adminSecret } = req.body;
+        const { name, teamId } = req.body;
 
-        // ── Admin registration (optional, via a secret key) ──
-        let role = 'participant';
-        if (adminSecret && adminSecret === process.env.JWT_SECRET) {
-            role = 'admin';
+        if (!name || !teamId) {
+            return next(new ErrorResponse('name and teamId are required', 400));
         }
 
-        // ── Participant must provide a valid teamId ──
-        let team = null;
-        if (role === 'participant') {
-            if (!teamId) {
-                return next(new ErrorResponse('teamId is required for participants', 400));
-            }
-            team = await Team.findOne({ teamId });
-            if (!team) {
-                return next(new ErrorResponse('Invalid teamId — ask admin to create one', 404));
-            }
-            if (team.members.length >= 3) {
-                return next(new ErrorResponse('Team already has 3 members', 400));
-            }
+        // ── Validate the team exists ──
+        const team = await Team.findOne({ teamId });
+        if (!team) {
+            return next(new ErrorResponse('Invalid teamId — ask admin to create one', 404));
+        }
+        if (team.members.length >= 3) {
+            return next(new ErrorResponse('Team already has 3 members', 400));
         }
 
-        // ── Check duplicate name ──
-        const existingUser = await User.findOne({ name });
+        // ── Check duplicate name within the same team ──
+        const existingUser = await User.findOne({ name, teamId });
         if (existingUser) {
-            return next(new ErrorResponse('Name already taken', 400));
+            return next(new ErrorResponse('Name already taken in this team', 400));
         }
 
-        // ── Create user ──
+        // ── Create participant user ──
         const user = await User.create({
             name,
-            password,
-            teamId: role === 'participant' ? teamId : null,
-            role,
+            teamId,
+            role: 'participant',
         });
 
         // ── Push user into team.members ──
-        if (team) {
-            team.members.push(user._id);
-            await team.save();
-        }
+        team.members.push(user._id);
+        await team.save();
 
         const token = generateToken(user);
 
@@ -78,25 +67,35 @@ const register = async (req, res, next) => {
 
 /**
  * @route   POST /api/auth/login
- * @desc    Login and receive JWT
+ * @desc    Login — participants use name+teamId, admin uses name+adminSecret
  * @access  Public
  */
 const login = async (req, res, next) => {
     try {
-        const { name, password } = req.body;
+        const { name, teamId, adminSecret } = req.body;
 
-        if (!name || !password) {
-            return next(new ErrorResponse('Please provide name and password', 400));
+        if (!name) {
+            return next(new ErrorResponse('Please provide your name', 400));
         }
 
-        const user = await User.findOne({ name }).select('+password');
+        let user;
+
+        if (adminSecret) {
+            // ── Admin login: verify secret key ──
+            if (adminSecret !== process.env.ADMIN_SECRET) {
+                return next(new ErrorResponse('Invalid admin secret', 401));
+            }
+            user = await User.findOne({ name, role: 'admin' });
+        } else {
+            // ── Participant login: look up by name + teamId ──
+            if (!teamId) {
+                return next(new ErrorResponse('Please provide your teamId', 400));
+            }
+            user = await User.findOne({ name, teamId });
+        }
+
         if (!user) {
-            return next(new ErrorResponse('Invalid credentials', 401));
-        }
-
-        const isMatch = await user.matchPassword(password);
-        if (!isMatch) {
-            return next(new ErrorResponse('Invalid credentials', 401));
+            return next(new ErrorResponse('Invalid credentials — user not found', 401));
         }
 
         const token = generateToken(user);
@@ -111,4 +110,4 @@ const login = async (req, res, next) => {
     }
 };
 
-module.exports = { register, login };
+module.exports = { signup, login };
